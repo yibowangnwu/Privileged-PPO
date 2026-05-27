@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "PrivilegedCriticConfig", "RolloutCorrectionConfig"]
 
 
 @dataclass
@@ -54,6 +54,21 @@ class FilterGroupsConfig(BaseConfig):
     enable: bool = False
     metric: Optional[str] = None
     max_num_gen_batches: int = 0
+
+
+@dataclass
+class PrivilegedCriticConfig(BaseConfig):
+    """Configuration for a training-only privileged critic context.
+
+    Args:
+        enable (bool): Whether to rebuild critic inputs with privileged context.
+        key (str): Non-tensor batch key that stores the reference trajectory/solution.
+        max_reference_length (int): Maximum number of reference tokens to include. Non-positive means no cap.
+    """
+
+    enable: bool = False
+    key: str = "reference_trace"
+    max_reference_length: int = 2048
 
 
 @dataclass
@@ -658,6 +673,7 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
+    privileged_critic: PrivilegedCriticConfig = field(default_factory=PrivilegedCriticConfig)
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None

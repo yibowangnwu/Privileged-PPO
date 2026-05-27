@@ -109,6 +109,18 @@ algorithm:
     # Power used for weight scaling in "pow" method
     weight_pow: 2.0
 
+  # Training-only privileged context for the critic. When disabled, PPO is unchanged.
+  privileged_critic:
+
+    # Whether to rebuild critic inputs with the reference trajectory/solution.
+    enable: False
+
+    # Non-tensor batch key containing the privileged reference text.
+    key: reference_trace
+
+    # Maximum number of reference tokens included in the critic prompt. Non-positive means no cap.
+    max_reference_length: 2048
+
 # config for the trainer
 trainer:
 

@@ -59,6 +59,10 @@ CRITIC_LR=${CRITIC_LR:-5e-6}
 KL_COEF=${KL_COEF:-0.001}
 ENTROPY_COEFF=${ENTROPY_COEFF:-0}
 
+PRIVILEGED_CRITIC_ENABLE=${PRIVILEGED_CRITIC_ENABLE:-False}
+PRIVILEGED_CRITIC_KEY=${PRIVILEGED_CRITIC_KEY:-reference_trace}
+PRIVILEGED_CRITIC_MAX_REFERENCE_LENGTH=${PRIVILEGED_CRITIC_MAX_REFERENCE_LENGTH:-2048}
+
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-2}
 SAVE_FREQ=${SAVE_FREQ:-100}
 TEST_FREQ=${TEST_FREQ:-10}
@@ -85,6 +89,24 @@ fi
 
 if [[ "$PREPARE_VAL_DATA" == "auto" && ( ! -f "$AMC23_FILE" || ! -f "$AIME24_FILE" || ! -f "$AIME25_FILE" || ! -f "$AIME26_FILE" ) ]]; then
     PREPARE_VAL_DATA=True
+fi
+
+if [[ "$PRIVILEGED_CRITIC_ENABLE" == "True" || "$PRIVILEGED_CRITIC_ENABLE" == "true" || "$PRIVILEGED_CRITIC_ENABLE" == "1" ]]; then
+    if [[ -f "$TRAIN_FILE" ]]; then
+        if ! TRAIN_FILE="$TRAIN_FILE" PRIVILEGED_CRITIC_KEY="$PRIVILEGED_CRITIC_KEY" python3 - <<'PY'
+import os
+import pyarrow.parquet as pq
+
+train_file = os.environ["TRAIN_FILE"]
+key = os.environ["PRIVILEGED_CRITIC_KEY"]
+schema = pq.ParquetFile(train_file).schema_arrow
+raise SystemExit(0 if key in schema.names else 1)
+PY
+        then
+            echo "Privileged critic is enabled but $TRAIN_FILE lacks column $PRIVILEGED_CRITIC_KEY; regenerating data."
+            PREPARE_DATA=True
+        fi
+    fi
 fi
 
 cat > "$REWARD_FN_FILE" <<'PY'
@@ -214,12 +236,14 @@ def has_problem_and_answer(example):
 def process(example, idx):
     problem = example.get("problem") or example.get("question")
     answer = example.get("answer") or example.get("final_answer")
+    reference_trace = example.get("solution") or example.get("reference_solution") or ""
     question = str(problem).strip()
     if "\\boxed{}" not in question:
         question = f"{question}\n\n{instruction}"
     return {
         "data_source": "math",
         "prompt": [{"role": "user", "content": question}],
+        "reference_trace": str(reference_trace).strip(),
         "ability": "math",
         "reward_model": {"style": "rule", "ground_truth": str(answer).strip()},
         "extra_info": {
@@ -266,6 +290,7 @@ def strip_boxed(text):
 def process(example, idx, name):
     problem = example.get("problem") or example.get("question")
     answer = example.get("answer") or example.get("solution")
+    reference_trace = ""
     if problem is None or answer is None:
         return None
     question = str(problem).strip()
@@ -274,6 +299,7 @@ def process(example, idx, name):
     return {
         "data_source": name,
         "prompt": [{"role": "user", "content": question}],
+        "reference_trace": str(reference_trace).strip(),
         "ability": "math",
         "reward_model": {"style": "rule", "ground_truth": strip_boxed(answer)},
         "extra_info": {
@@ -302,6 +328,9 @@ DATA=(
     algorithm.use_kl_in_reward=True
     algorithm.kl_ctrl.type=fixed
     algorithm.kl_ctrl.kl_coef=${KL_COEF}
+    algorithm.privileged_critic.enable=${PRIVILEGED_CRITIC_ENABLE}
+    algorithm.privileged_critic.key=${PRIVILEGED_CRITIC_KEY}
+    algorithm.privileged_critic.max_reference_length=${PRIVILEGED_CRITIC_MAX_REFERENCE_LENGTH}
     data.train_files="['$TRAIN_FILE']"
     data.val_files="$VAL_FILES"
     data.train_batch_size=${TRAIN_BATCH_SIZE}

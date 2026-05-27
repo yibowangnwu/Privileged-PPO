@@ -67,6 +67,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
+from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -573,7 +574,10 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
-        reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
+        keys_to_keep = {"data_source", "reward_model", "extra_info", "uid"}
+        if self._use_privileged_critic():
+            keys_to_keep.add(self.config.algorithm.privileged_critic.get("key", "reference_trace"))
+        reward_keys = keys_to_keep & batch.non_tensor_batch.keys()
 
         # pop those keys for generation
         batch_keys_to_pop = []
@@ -1228,6 +1232,93 @@ class RayPPOTrainer:
         values = DataProto.from_tensordict(values)
         return values
 
+    def _use_privileged_critic(self) -> bool:
+        privileged_cfg = self.config.algorithm.get("privileged_critic", None)
+        return bool(privileged_cfg and privileged_cfg.get("enable", False))
+
+    def _tokenize_privileged_critic_prefix(self, problem: str, reference_trace: str) -> list[int]:
+        privileged_cfg = self.config.algorithm.privileged_critic
+        max_reference_length = int(privileged_cfg.get("max_reference_length", 2048))
+        if max_reference_length > 0:
+            reference_ids = self.tokenizer.encode(reference_trace, add_special_tokens=False)
+            reference_trace = self.tokenizer.decode(reference_ids[:max_reference_length], skip_special_tokens=True)
+
+        content = (
+            "You are a value critic for math reasoning RL.\n"
+            "Use the reference solution only to estimate whether the student solution prefix is making progress "
+            "toward a verifier-correct answer. Do not generate an answer.\n\n"
+            "[Problem]\n"
+            f"{problem}\n\n"
+            "[Reference solution]\n"
+            f"{reference_trace}\n\n"
+            "[Student solution]\n"
+        )
+        messages = [{"role": "user", "content": content}]
+        try:
+            tokenized = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+            return normalize_token_ids(tokenized)
+        except Exception:
+            return self.tokenizer.encode(content, add_special_tokens=False)
+
+    def _make_privileged_critic_batch(self, batch: DataProto) -> DataProto:
+        if not self._use_privileged_critic():
+            return batch
+
+        privileged_cfg = self.config.algorithm.privileged_critic
+        reference_key = privileged_cfg.get("key", "reference_trace")
+        if reference_key not in batch.non_tensor_batch:
+            raise KeyError(
+                f"Privileged critic is enabled, but non_tensor_batch has no key {reference_key!r}. "
+                f"Available keys: {list(batch.non_tensor_batch.keys())}"
+            )
+
+        device = batch.batch["responses"].device
+        responses = batch.batch["responses"]
+        response_mask = batch.batch["response_mask"]
+        references = batch.non_tensor_batch[reference_key]
+        problems = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+
+        prefix_ids_list = [
+            self._tokenize_privileged_critic_prefix(problem=str(problem), reference_trace=str(reference))
+            for problem, reference in zip(problems, references, strict=True)
+        ]
+        max_prefix_len = max(len(prefix_ids) for prefix_ids in prefix_ids_list)
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        critic_prompts = torch.full(
+            (len(prefix_ids_list), max_prefix_len), pad_token_id, dtype=responses.dtype, device=device
+        )
+        prompt_mask = torch.zeros((len(prefix_ids_list), max_prefix_len), dtype=response_mask.dtype, device=device)
+        prompt_position_ids = torch.zeros((len(prefix_ids_list), max_prefix_len), dtype=torch.long, device=device)
+        response_position_ids = torch.zeros_like(responses, dtype=torch.long, device=device)
+
+        for i, prefix_ids in enumerate(prefix_ids_list):
+            prefix_len = len(prefix_ids)
+            critic_prompts[i, :prefix_len] = torch.tensor(prefix_ids, dtype=responses.dtype, device=device)
+            prompt_mask[i, :prefix_len] = 1
+            prompt_position_ids[i, :prefix_len] = torch.arange(prefix_len, dtype=torch.long, device=device)
+            resp_len = int(response_mask[i].sum().item())
+            if resp_len > 0:
+                response_position_ids[i, :resp_len] = torch.arange(
+                    prefix_len, prefix_len + resp_len, dtype=torch.long, device=device
+                )
+
+        critic_batch = DataProto(
+            batch=batch.batch.clone(),
+            non_tensor_batch=batch.non_tensor_batch,
+            meta_info=dict(batch.meta_info),
+        )
+        critic_batch.batch["prompts"] = critic_prompts
+        critic_batch.batch["input_ids"] = torch.cat([critic_prompts, responses], dim=1)
+        critic_batch.batch["attention_mask"] = torch.cat([prompt_mask, response_mask], dim=1)
+        critic_batch.batch["position_ids"] = torch.cat([prompt_position_ids, response_position_ids], dim=1)
+        critic_batch.meta_info["privileged_critic"] = True
+        return critic_batch
+
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
@@ -1581,7 +1672,7 @@ class RayPPOTrainer:
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
-                            values = self._compute_values(batch)
+                            values = self._compute_values(self._make_privileged_critic_batch(batch))
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
@@ -1634,7 +1725,7 @@ class RayPPOTrainer:
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self._update_critic(batch)
+                            critic_output = self._update_critic(self._make_privileged_critic_batch(batch))
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
