@@ -33,15 +33,20 @@ export CRITIC_PARAM_OFFLOAD=False
 export CRITIC_OPTIMIZER_OFFLOAD=False
 export REF_PARAM_OFFLOAD=False
 
-export PRIVILEGED_CRITIC_ENABLE=False
+export PRIVILEGED_CRITIC_ENABLE=True
+export PRIVILEGED_CRITIC_KEY=${PRIVILEGED_CRITIC_KEY:-reference_trace}
+export PRIVILEGED_CRITIC_MAX_REFERENCE_LENGTH=${PRIVILEGED_CRITIC_MAX_REFERENCE_LENGTH:-2048}
+
+# GAE lambda controls the bias/variance tradeoff; gamma remains unchanged.
+export GAE_LAMBDA=${GAE_LAMBDA:-0.995}
 
 # Keep the timing run focused on rollout and PPO updates.
 export SAVE_FREQ=${SAVE_FREQ:--1}
-export TEST_FREQ=${TEST_FREQ:--1}
+export TEST_FREQ=${TEST_FREQ:-2}
 export VAL_BEFORE_TRAIN=False
 
-export PROJECT_NAME=${PROJECT_NAME:-verl_ppo_qwen3_4b_b300_timing}
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_4b_ppo_8k_n8_bs256_2xb300_$(date +%Y%m%d_%H%M)}
+export PROJECT_NAME=${PROJECT_NAME:-verl_pvc_ppo_qwen3_4b_b300_timing}
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_4b_pvc_ppo_8k_n8_bs256_lam${GAE_LAMBDA}_2xb300_$(date +%Y%m%d_%H%M)}
 
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
 

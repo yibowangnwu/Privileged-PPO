@@ -58,6 +58,7 @@ ACTOR_LR=${ACTOR_LR:-1e-6}
 CRITIC_LR=${CRITIC_LR:-5e-6}
 KL_COEF=${KL_COEF:-0.001}
 ENTROPY_COEFF=${ENTROPY_COEFF:-0}
+GAE_LAMBDA=${GAE_LAMBDA:-1.0}
 
 PRIVILEGED_CRITIC_ENABLE=${PRIVILEGED_CRITIC_ENABLE:-False}
 PRIVILEGED_CRITIC_KEY=${PRIVILEGED_CRITIC_KEY:-reference_trace}
@@ -325,6 +326,7 @@ fi
 
 DATA=(
     algorithm.adv_estimator=gae
+    algorithm.lam=${GAE_LAMBDA}
     algorithm.use_kl_in_reward=True
     algorithm.kl_ctrl.type=fixed
     algorithm.kl_ctrl.kl_coef=${KL_COEF}
